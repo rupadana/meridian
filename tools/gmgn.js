@@ -93,6 +93,22 @@ function num(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// ─── Token security (rug ratio) for the maxRugPct gate ──────────
+// Returns { rug_ratio } (0-1, GMGN: >0.3 = high risk) or null on
+// missing key / error so the gate degrades to a pass-through.
+export async function getGmgnTokenSecurity(mint) {
+  if (!mint || !hasGmgnApiKey()) return null;
+  try {
+    const payload = await gmgnFetch("/v1/token/security", { params: { chain: "sol", address: mint } });
+    const info = payload?.data?.data || payload?.data || payload;
+    if (!info || typeof info !== "object") return null;
+    return { rug_ratio: num(info.rug_ratio) };
+  } catch (error) {
+    log("gmgn", `token security lookup failed for ${String(mint).slice(0, 8)}: ${error.message}`);
+    return null;
+  }
+}
+
 // ─── Token fees (SOL) for the minTokenFeesSol gate ──────────────
 // Returns { total_fee, trade_fee } in SOL, or null on missing key / error
 // so callers can fall back to Jupiter's fee figure.

@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { getGmgnTokenFees, hasGmgnApiKey } from "./gmgn.js";
+import { getGmgnTokenFees, getGmgnTokenSecurity, hasGmgnApiKey } from "./gmgn.js";
 
 const DATAPI_BASE = "https://datapi.jup.ag/v1";
 
@@ -76,6 +76,8 @@ export async function getTokenInfo({ query }) {
   // Refine the primary match's fee figure from GMGN (the gate value consumers read).
   if (results[0]?.mint) {
     results[0].global_fees_sol = await resolveGlobalFeesSol(results[0].mint, tokens[0]?.fees);
+    const sec = await getGmgnTokenSecurity(results[0].mint);
+    if (sec?.rug_ratio != null) results[0].rug_pct = +(sec.rug_ratio * 100).toFixed(1);
   }
 
   return { found: true, query, results };

@@ -38,6 +38,7 @@
   "avoidPvpSymbols": true,
   "blockPvpSymbols": false,
   "maxBotHoldersPct": 30,
+  "maxRugPct": 30,
   "maxTop10Pct": 60,
   "allowedLaunchpads": [],
   "blockedLaunchpads": [],

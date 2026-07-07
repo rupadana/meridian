@@ -464,6 +464,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
         return false;
       }
+      const rugPct = ti?.rug_pct;
+      const maxRugPct = config.screening.maxRugPct;
+      if (rugPct != null && maxRugPct != null && rugPct > maxRugPct) {
+        log("screening", `Rug filter: dropped ${pool.name} — GMGN rug ${rugPct}% > ${maxRugPct}%`);
+        filteredOut.push({ name: pool.name, reason: `GMGN rug ${rugPct}% > ${maxRugPct}%` });
+        return false;
+      }
       return true;
     });
 
@@ -537,7 +544,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.tvl ?? pool.active_tvl}, volatility_${pool.volatility_timeframe || "30m"}=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
-        `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
+        `  audit: top10=${top10Pct}%, bots=${botPct}%, rug=${ti?.rug_pct ?? "?"}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
         pvpLine,
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
         activeBin != null ? `  active_bin: ${activeBin}` : null,
@@ -1699,6 +1706,10 @@ function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
   }
   if (Number.isFinite(botPct) && botPct > config.screening.maxBotHoldersPct) {
     return `bot holders ${botPct}% above maximum ${config.screening.maxBotHoldersPct}%`;
+  }
+  const rugPct = Number(tokenInfo.rug_pct);
+  if (Number.isFinite(rugPct) && config.screening.maxRugPct != null && rugPct > config.screening.maxRugPct) {
+    return `GMGN rug ${rugPct}% above maximum ${config.screening.maxRugPct}%`;
   }
 
   // PVP conflict needs strong conviction (degen) to deploy solo.
