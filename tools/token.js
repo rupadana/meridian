@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { getGmgnTokenFees, getGmgnTokenSecurity, hasGmgnApiKey } from "./gmgn.js";
+import { getGmgnTokenFees, hasGmgnApiKey } from "./gmgn.js";
 
 const DATAPI_BASE = "https://datapi.jup.ag/v1";
 
@@ -12,6 +12,20 @@ async function resolveGlobalFeesSol(mint, jupiterFees) {
   const fees = await getGmgnTokenFees(mint);
   if (fees?.total_fee != null) return parseFloat(fees.total_fee.toFixed(2));
   return jup;
+}
+
+// Rug risk % for the maxRugPct gate — rugcheck.xyz normalized score (0-100).
+// GMGN's OpenAPI does not expose rug_ratio for Solana (verified live), so
+// rugcheck is the source. Null on error → gate degrades to a pass-through.
+async function getRugPct(mint) {
+  try {
+    const res = await fetch(`https://api.rugcheck.xyz/v1/tokens/${mint}/report/summary`, { signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const n = Number((await res.json())?.score_normalised);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -76,8 +90,8 @@ export async function getTokenInfo({ query }) {
   // Refine the primary match's fee figure from GMGN (the gate value consumers read).
   if (results[0]?.mint) {
     results[0].global_fees_sol = await resolveGlobalFeesSol(results[0].mint, tokens[0]?.fees);
-    const sec = await getGmgnTokenSecurity(results[0].mint);
-    if (sec?.rug_ratio != null) results[0].rug_pct = +(sec.rug_ratio * 100).toFixed(1);
+    const rugPct = await getRugPct(results[0].mint);
+    if (rugPct != null) results[0].rug_pct = rugPct;
   }
 
   return { found: true, query, results };

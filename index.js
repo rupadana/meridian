@@ -467,8 +467,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const rugPct = ti?.rug_pct;
       const maxRugPct = config.screening.maxRugPct;
       if (rugPct != null && maxRugPct != null && rugPct > maxRugPct) {
-        log("screening", `Rug filter: dropped ${pool.name} — GMGN rug ${rugPct}% > ${maxRugPct}%`);
-        filteredOut.push({ name: pool.name, reason: `GMGN rug ${rugPct}% > ${maxRugPct}%` });
+        log("screening", `Rug filter: dropped ${pool.name} — rug score ${rugPct}% > ${maxRugPct}%`);
+        filteredOut.push({ name: pool.name, reason: `rug score ${rugPct}% > ${maxRugPct}%` });
         return false;
       }
       return true;
@@ -621,6 +621,7 @@ STEPS:
    AUDIT
    Top10: <x>%
    Bots: <x>%
+   Rug: <x>% (from the candidate block rug= value; "?" if unknown)
    Fees paid: <x> SOL
    Smart wallets: <names or none>
 
@@ -1288,7 +1289,7 @@ function formatHelpText() {
     "/setcfg <key> <value> — update persisted config",
     "/screen — refresh deterministic candidate list",
     "/candidates — show latest cached candidates",
-    "/token <mint> — token detail + GMGN rug %",
+    "/token <mint> — token detail + rug %",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
@@ -1598,7 +1599,7 @@ async function telegramHandler(msg) {
         `Mint: ${t.mint}`,
         `Price: $${price} | MCap: ${usd(t.mcap)} | Liq: ${usd(t.liquidity)}`,
         `Holders: ${t.holders?.toLocaleString("en-US") ?? "?"} | Organic: ${t.organic_score?.toFixed(1) ?? "?"}${t.organic_label ? ` (${t.organic_label})` : ""}`,
-        `Rug (GMGN): ${t.rug_pct != null ? `${t.rug_pct}%${t.rug_pct > rugLimit ? " ⚠️ HIGH RISK" : " ✅"}` : "n/a"}`,
+        `Rug (rugcheck): ${t.rug_pct != null ? `${t.rug_pct}%${t.rug_pct > rugLimit ? " ⚠️ HIGH RISK" : " ✅"}` : "n/a"}`,
         `Audit: top10 ${t.audit?.top_holders_pct ?? "?"}% | bots ${t.audit?.bot_holders_pct ?? "?"}% | mint ${t.audit?.mint_disabled ? "off ✅" : "ON ⚠️"} | freeze ${t.audit?.freeze_disabled ? "off ✅" : "ON ⚠️"}`,
         `Fees: ${t.global_fees_sol ?? "?"} SOL${t.launchpad ? ` | Launchpad: ${t.launchpad}` : ""}`,
         t.stats_1h ? `1h: price ${t.stats_1h.price_change}% | net buyers ${t.stats_1h.net_buyers ?? "?"}` : null,
@@ -1738,7 +1739,7 @@ function getLoneCandidateSkipReason({ pool, sw, n, ti } = {}) {
   }
   const rugPct = Number(tokenInfo.rug_pct);
   if (Number.isFinite(rugPct) && config.screening.maxRugPct != null && rugPct > config.screening.maxRugPct) {
-    return `GMGN rug ${rugPct}% above maximum ${config.screening.maxRugPct}%`;
+    return `rug score ${rugPct}% above maximum ${config.screening.maxRugPct}%`;
   }
 
   // PVP conflict needs strong conviction (degen) to deploy solo.
