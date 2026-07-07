@@ -1288,6 +1288,7 @@ function formatHelpText() {
     "/setcfg <key> <value> — update persisted config",
     "/screen — refresh deterministic candidate list",
     "/candidates — show latest cached candidates",
+    "/token <mint> — token detail + GMGN rug %",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
     "/hive — HiveMind sync status",
@@ -1577,6 +1578,34 @@ async function telegramHandler(msg) {
 
   if (text === "/candidates") {
     await sendMessage(describeLatestCandidates(5)).catch(() => {});
+    return;
+  }
+
+  const tokenMatch = text.match(/^\/token\s+(\S+)$/i);
+  if (tokenMatch) {
+    try {
+      const info = await getTokenInfo({ query: tokenMatch[1] });
+      const t = info?.results?.[0];
+      if (!t) {
+        await sendMessage(`Token not found: ${tokenMatch[1]}`).catch(() => {});
+        return;
+      }
+      const rugLimit = config.screening.maxRugPct ?? 30;
+      const usd = (v) => v != null ? `$${Math.round(v).toLocaleString("en-US")}` : "$?";
+      const price = t.price != null ? (t.price < 0.0001 ? t.price.toExponential(3) : t.price.toFixed(6)) : "?";
+      await sendMessage([
+        `🔎 ${t.name} (${t.symbol})`,
+        `Mint: ${t.mint}`,
+        `Price: $${price} | MCap: ${usd(t.mcap)} | Liq: ${usd(t.liquidity)}`,
+        `Holders: ${t.holders?.toLocaleString("en-US") ?? "?"} | Organic: ${t.organic_score?.toFixed(1) ?? "?"}${t.organic_label ? ` (${t.organic_label})` : ""}`,
+        `Rug (GMGN): ${t.rug_pct != null ? `${t.rug_pct}%${t.rug_pct > rugLimit ? " ⚠️ HIGH RISK" : " ✅"}` : "n/a"}`,
+        `Audit: top10 ${t.audit?.top_holders_pct ?? "?"}% | bots ${t.audit?.bot_holders_pct ?? "?"}% | mint ${t.audit?.mint_disabled ? "off ✅" : "ON ⚠️"} | freeze ${t.audit?.freeze_disabled ? "off ✅" : "ON ⚠️"}`,
+        `Fees: ${t.global_fees_sol ?? "?"} SOL${t.launchpad ? ` | Launchpad: ${t.launchpad}` : ""}`,
+        t.stats_1h ? `1h: price ${t.stats_1h.price_change}% | net buyers ${t.stats_1h.net_buyers ?? "?"}` : null,
+      ].filter(Boolean).join("\n")).catch(() => {});
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
     return;
   }
 

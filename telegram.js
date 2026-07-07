@@ -422,6 +422,7 @@ const BOT_COMMANDS = [
   { command: "setcfg",     description: "Update persisted config key" },
   { command: "screen",     description: "Refresh deterministic candidate list" },
   { command: "candidates", description: "Show latest cached candidates" },
+  { command: "token",      description: "Token detail + GMGN rug % by mint" },
   { command: "deploy",     description: "Deploy candidate by cached index" },
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
