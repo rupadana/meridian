@@ -252,6 +252,52 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       } else {
         lines.push(`${p.pair}: flip failed (close position failed)`);
       }
+    } else if (act.action === "CLOSE_AND_CHASE") {
+      log("cron", `Executing CLOSE_AND_CHASE transition for position ${p.position}`);
+      await liveMessage?.toolStart("close_position");
+      // Close the position (auto-swaps remainder back to SOL, since it went OOR right, so we are 100% in SOL)
+      const resClose = await executeTool("close_position", { position_address: p.position, reason: act.reason || "OOR kanan chase close" }).catch(e => ({ error: e.message }));
+      const closeOk = resClose?.success !== false && !resClose?.error && !resClose?.blocked;
+      await liveMessage?.toolFinish("close_position", resClose, closeOk);
+
+      if (closeOk) {
+        lines.push(`${p.pair}: closed position (OOR kanan)`);
+        
+        // Redeploy new SOL-only Panda Start position to chase price
+        try {
+          const solBalances = await getWalletBalances().catch(() => null);
+          const solAmount = solBalances?.sol ? computeDeployAmount(solBalances.sol) : 0.2;
+          
+          await liveMessage?.toolStart("deploy_position");
+          const tracked = getTrackedPosition(p.position);
+          const binStep = tracked?.bin_step || 100;
+          const resDeploy = await executeTool("deploy_position", {
+            pool_address: p.pool,
+            amount_x: 0,
+            amount_y: solAmount,
+            downside_pct: 90, // Panda range
+            bins_above: 0,
+            strategy: "spot", // Spot single-side SOL
+            pool_name: p.pair,
+            bin_step: binStep,
+            base_fee: p.base_fee || null,
+          }).catch(e => ({ error: e.message }));
+
+          const deployOk = resDeploy?.success !== false && !resDeploy?.error && !resDeploy?.blocked;
+          await liveMessage?.toolFinish("deploy_position", resDeploy, deployOk);
+          
+          if (deployOk) {
+            lines.push(`${p.pair}: successfully chased position (redeployed ${solAmount} SOL Panda Start)`);
+          } else {
+            lines.push(`${p.pair}: chase deployment FAILED — ${resDeploy?.error || resDeploy?.reason || "unknown"}`);
+          }
+        } catch (err) {
+          log("cron_error", `Error redeploying for chase: ${err.message}`);
+          lines.push(`${p.pair}: chase failed during redeployment (${err.message})`);
+        }
+      } else {
+        lines.push(`${p.pair}: chase failed (close position failed)`);
+      }
     }
   }
 
@@ -394,6 +440,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
       if (act.action === "FLIP_TO_TOKEN") line += `\n→ Flipping to dual-sided LP (Bonus Stage)`;
+      if (act.action === "CLOSE_AND_CHASE") line += `\n→ Closing and chasing price (redeploying SOL)`;
       return line;
     });
 
@@ -1008,6 +1055,24 @@ function getDeterministicCloseRule(position, managementConfig) {
     }
     return false;
   })();
+
+  if (tracked?.strategy === "panda_supertrend_flip") {
+    // 1. OOR Kanan (Upside OOR): Close immediately to chase position
+    if (position.active_bin != null && position.upper_bin != null && position.active_bin > position.upper_bin) {
+      return { action: "CLOSE_AND_CHASE", rule: 10, reason: "OOR kanan (chase position)" };
+    }
+
+    // 2. Stop Loss (CL): Close if price drops below 50%
+    if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= -50) {
+      return { action: "CLOSE", rule: 11, reason: "OOR kiri cut loss (-50%)" };
+    }
+
+    // 3. Downside OOR (OOR kiri): Hold, do not close on time limit!
+    if (position.active_bin != null && position.lower_bin != null && position.active_bin < position.lower_bin) {
+      // Just STAY, bypass time-based close
+      return null;
+    }
+  }
 
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
