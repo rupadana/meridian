@@ -639,7 +639,7 @@ export async function executeTool(name, args) {
   const startTime = Date.now();
 
   // Strip model artifacts like "<|channel|>commentary" appended to tool names
-  name = name.replace(/<.*$/, "").trim();
+  name = name.replace(/<.*$/, "").trim().replace(/^\$/, "").toLowerCase();
 
   // ─── Validate tool exists ─────────────────
   const fn = toolMap[name];
