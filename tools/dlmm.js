@@ -542,13 +542,15 @@ export async function deployPosition({
   if (!Number.isFinite(finalAmountY) || !Number.isFinite(finalAmountX) || finalAmountY < 0 || finalAmountX < 0) {
     throw new Error("Invalid deploy amount: amount_x and amount_y must be valid non-negative numbers.");
   }
-  if (finalAmountX > 0) {
-    throw new Error("Unsupported deploy amount: this agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.");
+  if (finalAmountX <= 0 && finalAmountY <= 0) {
+    throw new Error("Invalid deploy amount: provide a positive amount_x or amount_y/amount_sol.");
   }
-  if (finalAmountY <= 0) {
-    throw new Error("Invalid deploy amount: provide a positive amount_y/amount_sol.");
+  if (finalAmountX > 0 && finalAmountY > 0) {
+    throw new Error("Unsupported deploy amount: this agent does not support dual-sided deposits.");
   }
   const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
+  const isSingleSidedToken = finalAmountX > 0 && finalAmountY <= 0;
+
   if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || Number(upside_pct ?? 0) > 0)) {
     throw new Error(
       "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
@@ -557,6 +559,16 @@ export async function deployPosition({
   if (isSingleSidedSol) {
     activeBinsAbove = 0;
   }
+
+  if (isSingleSidedToken && (Number(bins_below ?? 0) > 0 || Number(downside_pct ?? 0) > 0)) {
+    throw new Error(
+      "Single-side Token deploy cannot use bins_below or downside_pct. Use amount_x with bins_above only; the lower bin is the SDK active bin.",
+    );
+  }
+  if (isSingleSidedToken) {
+    activeBinsBelow = 0;
+  }
+
   activeBinsBelow = Number(activeBinsBelow);
   activeBinsAbove = Number(activeBinsAbove);
   if (!Number.isFinite(activeBinsBelow) || !Number.isFinite(activeBinsAbove)) {
@@ -595,7 +607,7 @@ export async function deployPosition({
   }
 
   const isWideRange = totalBins > 69;
-  const minBinId = activeBin.binId - activeBinsBelow;
+  const minBinId = isSingleSidedToken ? activeBin.binId : activeBin.binId - activeBinsBelow;
   const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
 
   if (minBinId > maxBinId) {
@@ -604,6 +616,11 @@ export async function deployPosition({
   if (isSingleSidedSol && maxBinId !== activeBin.binId) {
     throw new Error(
       `Single-side SOL deploy must end at the SDK active bin. Expected ${activeBin.binId}, got ${maxBinId}.`,
+    );
+  }
+  if (isSingleSidedToken && minBinId !== activeBin.binId) {
+    throw new Error(
+      `Single-side Token deploy must start at the SDK active bin. Expected ${activeBin.binId}, got ${minBinId}.`,
     );
   }
 

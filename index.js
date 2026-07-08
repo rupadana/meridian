@@ -3,10 +3,12 @@ import cron from "node-cron";
 import readline from "readline";
 import path from "path";
 import { fileURLToPath } from "url";
+import { PublicKey } from "@solana/web3.js";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getWalletBalances, getConnection, getWallet } from "./tools/wallet.js";
+import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { getTopCandidates, degenScore } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -184,6 +186,69 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
       const ok = res?.success !== false && !res?.error && !res?.blocked;
       await liveMessage?.toolFinish("claim_fees", res, ok);
       lines.push(`${p.pair}: ${ok ? "fees claimed" : `claim FAILED — ${res?.error || res?.reason || "unknown"}`}`);
+    } else if (act.action === "FLIP_TO_TOKEN") {
+      log("cron", `Executing FLIP_TO_TOKEN transition for position ${p.position}`);
+      await liveMessage?.toolStart("close_position");
+      // Step A: Close the position with skip_swap: true to retain the token
+      const resClose = await executeTool("close_position", { position_address: p.position, skip_swap: true, reason: "Supertrend Flip close" }).catch(e => ({ error: e.message }));
+      const closeOk = resClose?.success !== false && !resClose?.error && !resClose?.blocked;
+      await liveMessage?.toolFinish("close_position", resClose, closeOk);
+
+      if (closeOk) {
+        lines.push(`${p.pair}: closed position and held token (skip_swap: true)`);
+
+        // Step B: Query token balance of the wallet using direct connection
+        const baseMint = p.base_mint;
+        if (!baseMint) {
+          log("cron_error", `Cannot perform flip: base_mint not found on position data for ${p.pair}`);
+          lines.push(`${p.pair}: flip failed (base_mint missing)`);
+          continue;
+        }
+
+        try {
+          const connection = getConnection();
+          const wallet = getWallet();
+          const tokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: new PublicKey(baseMint) });
+          const balance = tokenAccounts.value?.[0]?.account?.data?.parsed?.info?.tokenAmount?.uiAmount ?? 0;
+
+          log("cron", `Found token balance for ${p.pair}: ${balance} tokens`);
+          if (balance <= 0) {
+            log("cron_warn", `Flip: Token balance is 0 for ${p.pair} — skipping redeployment`);
+            lines.push(`${p.pair}: flip completed (no tokens accumulated)`);
+            continue;
+          }
+
+          // Step C: Deploy the token back into the same pool as a Token-only position
+          await liveMessage?.toolStart("deploy_position");
+          const tracked = getTrackedPosition(p.position);
+          const binStep = tracked?.bin_step || 100;
+          const resDeploy = await executeTool("deploy_position", {
+            pool_address: p.pool,
+            amount_x: balance,
+            amount_y: 0,
+            bins_above: 69, // standard upside range
+            bins_below: 0,
+            strategy: "spot",
+            pool_name: p.pair,
+            bin_step: binStep,
+            base_fee: p.base_fee || null,
+          }).catch(e => ({ error: e.message }));
+
+          const deployOk = resDeploy?.success !== false && !resDeploy?.error && !resDeploy?.blocked;
+          await liveMessage?.toolFinish("deploy_position", resDeploy, deployOk);
+
+          if (deployOk) {
+            lines.push(`${p.pair}: successfully flipped to token-sided LP position (${balance} tokens)`);
+          } else {
+            lines.push(`${p.pair}: flip to token-sided LP FAILED — ${resDeploy?.error || resDeploy?.reason || "unknown"}`);
+          }
+        } catch (err) {
+          log("cron_error", `Error querying balance or redeploying for flip: ${err.message}`);
+          lines.push(`${p.pair}: flip failed during redeployment (${err.message})`);
+        }
+      } else {
+        lines.push(`${p.pair}: flip failed (close position failed)`);
+      }
     }
   }
 
@@ -276,6 +341,27 @@ export async function runManagementCycle({ silent = false } = {}) {
         continue;
       }
 
+      // Check for Supertrend Flip strategy transition
+      const tracked = getTrackedPosition(p.position);
+      if (tracked?.strategy === "panda_supertrend_flip") {
+        const baseMint = p.base_mint || tracked?.base_mint;
+        if (baseMint) {
+          try {
+            const indicatorResult = await confirmIndicatorPreset({
+              mint: baseMint,
+              side: "exit", // exits use exitPreset: "supertrend_break"
+            });
+            if (indicatorResult?.confirmed) {
+              log("cron", `Transition trigger: Supertrend flip confirmed for ${p.pair} (${baseMint.slice(0, 8)}). Setting action to FLIP_TO_TOKEN.`);
+              actionMap.set(p.position, { action: "FLIP_TO_TOKEN", reason: "Supertrend flip" });
+              continue;
+            }
+          } catch (err) {
+            log("cron_error", `Failed checking Supertrend for position ${p.position}: ${err.message}`);
+          }
+        }
+      }
+
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
         actionMap.set(p.position, closeRule);
@@ -304,6 +390,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
+      if (act.action === "FLIP_TO_TOKEN") line += `\n→ Flipping to token-sided LP`;
       return line;
     });
 
@@ -344,7 +431,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
+        if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => { });
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
@@ -557,15 +644,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
       if (config.darwin?.enabled) {
         const baseMint = pool.base?.mint || pool.base_mint || ti?.mint || null;
         stageSignals(pool.pool, {
-          base_mint:             baseMint,
-          organic_score:         pool.organic_score         ?? null,
-          fee_tvl_ratio:         pool.fee_active_tvl_ratio  ?? null,
-          volume:                pool.volume_window         ?? null,
-          mcap:                  pool.mcap                  ?? null,
-          holder_count:          ti?.holders                ?? null,
+          base_mint: baseMint,
+          organic_score: pool.organic_score ?? null,
+          fee_tvl_ratio: pool.fee_active_tvl_ratio ?? null,
+          volume: pool.volume_window ?? null,
+          mcap: pool.mcap ?? null,
+          holder_count: ti?.holders ?? null,
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
-          narrative_quality:     n?.narrative ? "present" : "absent",
-          volatility:            pool.volatility            ?? null,
+          narrative_quality: n?.narrative ? "present" : "absent",
+          volatility: pool.volatility ?? null,
         });
       }
 
@@ -643,18 +730,18 @@ STEPS:
 IMPORTANT:
 - Keep the whole report compact and highly scannable for Telegram.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, 2048, {
-        onToolStart: async ({ name }) => {
-          if (name === "deploy_position") deployAttempted = true;
-          await liveMessage?.toolStart(name);
-        },
-        onToolFinish: async ({ name, result, success }) => {
-          if (name === "deploy_position") {
-            deployAttempted = true;
-            deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
-          }
-          await liveMessage?.toolFinish(name, result, success);
-        },
-      });
+      onToolStart: async ({ name }) => {
+        if (name === "deploy_position") deployAttempted = true;
+        await liveMessage?.toolStart(name);
+      },
+      onToolFinish: async ({ name, result, success }) => {
+        if (name === "deploy_position") {
+          deployAttempted = true;
+          deploySucceeded = Boolean(success && result?.success !== false && !result?.error && !result?.blocked);
+        }
+        await liveMessage?.toolFinish(name, result, success);
+      },
+    });
     screenReport = content;
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
@@ -678,7 +765,7 @@ IMPORTANT:
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
-        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
+        if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => { });
         else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
       }
     }
@@ -1403,20 +1490,20 @@ async function telegramHandler(msg) {
     try {
       await applySettingsMenuCallback(msg);
     } catch (e) {
-      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => { });
     }
     return;
   }
   if (text === "/settings" || text === "/menu" || text === "/configmenu") {
-    await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => {}));
+    await showSettingsMenu().catch((e) => sendMessage(`Settings error: ${e.message}`).catch(() => { }));
     return;
   }
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
-      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
+      sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => { });
     } else {
-      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
+      sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => { });
     }
     return;
   }
@@ -1426,13 +1513,13 @@ async function telegramHandler(msg) {
       const briefing = await generateBriefing();
       await sendHTML(briefing);
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
     return;
   }
 
   if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => {});
+    await sendMessage(formatHelpText()).catch(() => { });
     return;
   }
 
@@ -1442,15 +1529,15 @@ async function telegramHandler(msg) {
       const suffix = text === "/status" && positions.total_positions
         ? `\n\nUse /positions for the numbered list.`
         : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
+      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => { });
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
     return;
   }
 
   if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => {});
+    await sendMessage(formatConfigSnapshot()).catch(() => { });
     return;
   }
 
@@ -1466,7 +1553,7 @@ async function telegramHandler(msg) {
         return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
       });
       await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
     return;
   }
 
@@ -1488,7 +1575,7 @@ async function telegramHandler(msg) {
         pos.instruction ? `Note: ${pos.instruction}` : null,
       ].filter(Boolean).join("\n"));
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
     return;
   }
@@ -1509,7 +1596,7 @@ async function telegramHandler(msg) {
       } else {
         await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
       }
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
     return;
   }
 
@@ -1527,9 +1614,9 @@ async function telegramHandler(msg) {
           results.push(`${pos.pair}: failed (${error.message})`);
         }
       }
-      await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => {});
+      await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => { });
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
     return;
   }
@@ -1544,7 +1631,7 @@ async function telegramHandler(msg) {
       const pos = positions[idx];
       setPositionInstruction(pos.position, note);
       await sendMessage(`✅ Note set for ${pos.pair}:\n"${note}"`);
-    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
     return;
   }
 
@@ -1558,27 +1645,27 @@ async function telegramHandler(msg) {
         reason: "Telegram slash command /setcfg",
       });
       if (!result?.success) {
-        await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => {});
+        await sendMessage(`Config update failed.\nUnknown: ${(result?.unknown || []).join(", ") || "none"}`).catch(() => { });
         return;
       }
-      await sendMessage(`✅ Updated ${key} = ${JSON.stringify(value)}`).catch(() => {});
+      await sendMessage(`✅ Updated ${key} = ${JSON.stringify(value)}`).catch(() => { });
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
     return;
   }
 
   if (text === "/screen") {
     try {
-      await sendMessage(await runDeterministicScreen(5)).catch(() => {});
+      await sendMessage(await runDeterministicScreen(5)).catch(() => { });
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
     return;
   }
 
   if (text === "/candidates") {
-    await sendMessage(describeLatestCandidates(5)).catch(() => {});
+    await sendMessage(describeLatestCandidates(5)).catch(() => { });
     return;
   }
 
@@ -1588,7 +1675,7 @@ async function telegramHandler(msg) {
       const info = await getTokenInfo({ query: tokenMatch[1] });
       const t = info?.results?.[0];
       if (!t) {
-        await sendMessage(`Token not found: ${tokenMatch[1]}`).catch(() => {});
+        await sendMessage(`Token not found: ${tokenMatch[1]}`).catch(() => { });
         return;
       }
       const rugLimit = config.screening.maxRugPct ?? 30;
@@ -1603,9 +1690,9 @@ async function telegramHandler(msg) {
         `Audit: top10 ${t.audit?.top_holders_pct ?? "?"}% | bots ${t.audit?.bot_holders_pct ?? "?"}% | mint ${t.audit?.mint_disabled ? "off ✅" : "ON ⚠️"} | freeze ${t.audit?.freeze_disabled ? "off ✅" : "ON ⚠️"}`,
         `Fees: ${t.global_fees_sol ?? "?"} SOL${t.launchpad ? ` | Launchpad: ${t.launchpad}` : ""}`,
         t.stats_1h ? `1h: price ${t.stats_1h.price_change}% | net buyers ${t.stats_1h.net_buyers ?? "?"}` : null,
-      ].filter(Boolean).join("\n")).catch(() => {});
+      ].filter(Boolean).join("\n")).catch(() => { });
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
     return;
   }
@@ -1625,9 +1712,9 @@ async function telegramHandler(msg) {
         coverage,
         `Position: ${result.position || "n/a"}`,
         result.txs?.length ? `Tx: ${result.txs[0]}` : null,
-      ].filter(Boolean).join("\n")).catch(() => {});
+      ].filter(Boolean).join("\n")).catch(() => { });
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
     return;
   }
@@ -1635,7 +1722,7 @@ async function telegramHandler(msg) {
   if (text === "/pause") {
     stopCronJobs();
     cronStarted = false;
-    await sendMessage("⏸ Paused autonomous cycles. Telegram control still works. Use /resume to start again.").catch(() => {});
+    await sendMessage("⏸ Paused autonomous cycles. Telegram control still works. Use /resume to start again.").catch(() => { });
     return;
   }
 
@@ -1645,9 +1732,9 @@ async function telegramHandler(msg) {
       timers.managementLastRun = Date.now();
       timers.screeningLastRun = Date.now();
       startCronJobs();
-      await sendMessage("▶️ Autonomous cycles resumed.").catch(() => {});
+      await sendMessage("▶️ Autonomous cycles resumed.").catch(() => { });
     } else {
-      await sendMessage("Autonomous cycles are already running.").catch(() => {});
+      await sendMessage("Autonomous cycles are already running.").catch(() => { });
     }
     return;
   }
@@ -1657,7 +1744,7 @@ async function telegramHandler(msg) {
       const enabled = isHiveMindEnabled();
       const agentId = ensureAgentId();
       if (!enabled) {
-        await sendMessage(`HiveMind: disabled\nAgent ID: ${agentId}\nSet hiveMindApiKey to connect.`).catch(() => {});
+        await sendMessage(`HiveMind: disabled\nAgent ID: ${agentId}\nSet hiveMindApiKey to connect.`).catch(() => { });
         return;
       }
       const isManualPull = text === "/hive pull";
@@ -1676,9 +1763,9 @@ async function telegramHandler(msg) {
         `Shared lessons: ${Array.isArray(lessons) ? lessons.length : (pullMode === "manual" ? "manual" : 0)}`,
         `Presets: ${Array.isArray(presets) ? presets.length : (pullMode === "manual" ? "manual" : 0)}`,
         isManualPull ? "Manual pull: completed" : null,
-      ].join("\n")).catch(() => {});
+      ].join("\n")).catch(() => { });
     } catch (e) {
-      await sendMessage(`HiveMind error: ${e.message}`).catch(() => {});
+      await sendMessage(`HiveMind error: ${e.message}`).catch(() => { });
     }
     return;
   }
@@ -1701,12 +1788,12 @@ async function telegramHandler(msg) {
     if (liveMessage) await liveMessage.finalize(stripThink(content));
     else await sendMessage(stripThink(content));
   } catch (e) {
-    if (liveMessage) await liveMessage.fail(e.message).catch(() => {});
-    else await sendMessage(`Error: ${e.message}`).catch(() => {});
+    if (liveMessage) await liveMessage.fail(e.message).catch(() => { });
+    else await sendMessage(`Error: ${e.message}`).catch(() => { });
   } finally {
     busy = false;
     refreshPrompt();
-    drainTelegramQueue().catch(() => {});
+    drainTelegramQueue().catch(() => { });
   }
 }
 

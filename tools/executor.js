@@ -744,16 +744,17 @@ async function runSafetyChecks(name, args) {
 
       const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
       const deployAmountX = Number(args.amount_x ?? 0);
-      if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
+      if (Number.isFinite(deployAmountX) && deployAmountX > 0 && deployAmountY > 0) {
         return {
           pass: false,
-          reason: "This agent only supports single-side SOL deploys. Use amount_y/amount_sol and keep amount_x=0.",
+          reason: "This agent only supports single-sided deploys (either SOL-only or Token-only). Dual-sided deposits are not supported.",
         };
       }
       const requestedBinsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow);
       const requestedBinsAbove = Number(args.bins_above ?? 0);
       const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
       const isSingleSidedSol = deployAmountY > 0 && deployAmountX <= 0;
+      const isSingleSidedToken = deployAmountX > 0 && deployAmountY <= 0;
       const requestedTotalBins = requestedBinsBelow + requestedBinsAbove;
       const requestedVolatility = args.volatility == null ? null : Number(args.volatility);
       if (args.volatility != null && (!Number.isFinite(requestedVolatility) || requestedVolatility <= 0)) {
@@ -798,6 +799,26 @@ async function runSafetyChecks(name, args) {
         return {
           pass: false,
           reason: "Single-side SOL deploy must use bins_above=0.",
+        };
+      }
+      if (
+        isSingleSidedToken &&
+        args.upside_pct == null &&
+        (!Number.isFinite(requestedBinsAbove) || !Number.isInteger(requestedBinsAbove) || requestedBinsAbove < minBinsBelow)
+      ) {
+        return {
+          pass: false,
+          reason: `bins_above ${args.bins_above ?? "missing"} is below minimum ${minBinsBelow}. Refusing 1-bin/tiny-range deploy.`,
+        };
+      }
+      if (
+        isSingleSidedToken &&
+        args.downside_pct == null &&
+        (!Number.isFinite(requestedBinsBelow) || !Number.isInteger(requestedBinsBelow) || requestedBinsBelow !== 0)
+      ) {
+        return {
+          pass: false,
+          reason: "Single-side Token deploy must use bins_below=0.",
         };
       }
 
