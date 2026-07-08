@@ -744,12 +744,6 @@ async function runSafetyChecks(name, args) {
 
       const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
       const deployAmountX = Number(args.amount_x ?? 0);
-      if (Number.isFinite(deployAmountX) && deployAmountX > 0 && deployAmountY > 0) {
-        return {
-          pass: false,
-          reason: "This agent only supports single-sided deploys (either SOL-only or Token-only). Dual-sided deposits are not supported.",
-        };
-      }
       const requestedBinsBelow = Number(args.bins_below ?? config.strategy.defaultBinsBelow ?? config.strategy.minBinsBelow);
       const requestedBinsAbove = Number(args.bins_above ?? 0);
       const minBinsBelow = Math.max(MIN_SAFE_BINS_BELOW, Number(config.strategy.minBinsBelow ?? MIN_SAFE_BINS_BELOW));
@@ -855,25 +849,30 @@ async function runSafetyChecks(name, args) {
 
       // Check amount limits
       const amountY = deployAmountY;
-      if (!Number.isFinite(amountY) || amountY <= 0) {
+      const amountX = deployAmountX;
+
+      if (amountX <= 0 && amountY <= 0) {
         return {
           pass: false,
-          reason: `Must provide a positive SOL amount (amount_y).`,
+          reason: `Must provide a positive amount of SOL (amount_y) or tokens (amount_x).`,
         };
       }
 
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
-      if (amountY < minDeploy) {
-        return {
-          pass: false,
-          reason: `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,
-        };
-      }
-      if (amountY > config.risk.maxDeployAmount) {
-        return {
-          pass: false,
-          reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
-        };
+      // Check SOL limits if SOL is being deployed
+      if (amountY > 0) {
+        const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+        if (amountY < minDeploy) {
+          return {
+            pass: false,
+            reason: `Amount ${amountY} SOL is below the minimum deploy amount (${minDeploy} SOL). Use at least ${minDeploy} SOL.`,
+          };
+        }
+        if (amountY > config.risk.maxDeployAmount) {
+          return {
+            pass: false,
+            reason: `SOL amount ${amountY} exceeds maximum allowed per position (${config.risk.maxDeployAmount}).`,
+          };
+        }
       }
 
       // Check SOL balance

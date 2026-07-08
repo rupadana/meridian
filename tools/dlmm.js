@@ -545,9 +545,6 @@ export async function deployPosition({
   if (finalAmountX <= 0 && finalAmountY <= 0) {
     throw new Error("Invalid deploy amount: provide a positive amount_x or amount_y/amount_sol.");
   }
-  if (finalAmountX > 0 && finalAmountY > 0) {
-    throw new Error("Unsupported deploy amount: this agent does not support dual-sided deposits.");
-  }
   const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
   const isSingleSidedToken = finalAmountX > 0 && finalAmountY <= 0;
 

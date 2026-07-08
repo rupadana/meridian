@@ -218,17 +218,20 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
             continue;
           }
 
-          // Step C: Deploy the token back into the same pool as a Token-only position
+          // Step C: Deploy both SOL and Token into the same pool as a Dual-sided Bid-Ask position (Bonus Stage)
+          const solBalances = await getWalletBalances().catch(() => null);
+          const solAmount = solBalances?.sol ? computeDeployAmount(solBalances.sol) : 0.2;
+
           await liveMessage?.toolStart("deploy_position");
           const tracked = getTrackedPosition(p.position);
           const binStep = tracked?.bin_step || 100;
           const resDeploy = await executeTool("deploy_position", {
             pool_address: p.pool,
             amount_x: balance,
-            amount_y: 0,
+            amount_y: solAmount,
             bins_above: 69, // standard upside range
-            bins_below: 0,
-            strategy: "spot",
+            bins_below: 69, // standard downside range
+            strategy: "bid_ask",
             pool_name: p.pair,
             bin_step: binStep,
             base_fee: p.base_fee || null,
@@ -238,9 +241,9 @@ async function executeManagementActions(actionPositions, actionMap, { liveMessag
           await liveMessage?.toolFinish("deploy_position", resDeploy, deployOk);
 
           if (deployOk) {
-            lines.push(`${p.pair}: successfully flipped to token-sided LP position (${balance} tokens)`);
+            lines.push(`${p.pair}: successfully flipped to dual-sided bid-ask LP position (Bonus Stage: ${balance} tokens + ${solAmount} SOL)`);
           } else {
-            lines.push(`${p.pair}: flip to token-sided LP FAILED — ${resDeploy?.error || resDeploy?.reason || "unknown"}`);
+            lines.push(`${p.pair}: flip to dual-sided bid-ask LP FAILED — ${resDeploy?.error || resDeploy?.reason || "unknown"}`);
           }
         } catch (err) {
           log("cron_error", `Error querying balance or redeploying for flip: ${err.message}`);
@@ -390,7 +393,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
-      if (act.action === "FLIP_TO_TOKEN") line += `\n→ Flipping to token-sided LP`;
+      if (act.action === "FLIP_TO_TOKEN") line += `\n→ Flipping to dual-sided LP (Bonus Stage)`;
       return line;
     });
 
